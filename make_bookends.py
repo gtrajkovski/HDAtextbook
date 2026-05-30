@@ -1,0 +1,39 @@
+import asyncio, subprocess
+from pathlib import Path
+import edge_tts
+from pydub import AudioSegment
+
+VOICE = "mk-MK-AleksandarNeural"
+RATE = "-5%"
+OUT = Path("audiobook_latin"); OUT.mkdir(exist_ok=True)
+
+INTRO_TXT = ("Препорачана акција. Роман од Горан Трајковски и Алан Шукарт. "
+             "Аудиоиздание на македонски јазик.")
+OUTRO_TXT = ("Ова беше „Препорачана акција“, роман од Горан Трајковски и Алан Шукарт. "
+             "Ви благодариме што слушавте.")
+
+def make_pad(path, dur):
+    # Original royalty-free ambient pad: a soft D-major chord with reverb.
+    fc = (f"sine=f=146.83:d={dur}[a];sine=f=185:d={dur}[b];"
+          f"sine=f=220:d={dur}[c];sine=f=293.66:d={dur}[d];"
+          f"[a][b][c][d]amix=inputs=4:duration=longest,"
+          f"aecho=0.8:0.88:60|120:0.4|0.3,lowpass=f=2200,"
+          f"afade=t=in:d=2,afade=t=out:st={dur-3}:d=3,volume=0.6")
+    subprocess.run(["ffmpeg","-y","-loglevel","error","-filter_complex",fc,
+                    "-ac","2",path], check=True)
+
+async def tts(text, path):
+    await edge_tts.Communicate(text, VOICE, rate=RATE).save(path)
+
+def build(text, out_path, lead_in=3000, tail=3500):
+    asyncio.run(tts(text, "/tmp/voice.mp3"))
+    voice = AudioSegment.from_mp3("/tmp/voice.mp3")
+    dur_s = (lead_in + len(voice) + tail) / 1000.0
+    make_pad("/tmp/pad.wav", dur_s)
+    pad = AudioSegment.from_file("/tmp/pad.wav").apply_gain(-9)  # sit under voice
+    mixed = pad.overlay(voice, position=lead_in)
+    mixed.export(out_path, format="mp3")
+    print(f"  -> {out_path}  ({Path(out_path).stat().st_size//1024} KB, {len(mixed)//1000}s)")
+
+print("Intro:");  build(INTRO_TXT, str(OUT/"00_Aleksandar_Voved.mp3"))
+print("Outro:");  build(OUTRO_TXT, str(OUT/"39_Aleksandar_Zavrshetok.mp3"))
