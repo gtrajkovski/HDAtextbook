@@ -99,6 +99,28 @@ def cardinal(n: int) -> str:
     return f"{head} {last}" if " и " in last else f"{head} и {last}"
 
 
+# Feminine ordinal forms (for reading a year, which agrees with «година»).
+_CARD2ORD = {
+    "еден": "прва", "два": "втора", "три": "трета", "четири": "четврта",
+    "пет": "петта", "шест": "шеста", "седум": "седма", "осум": "осма",
+    "девет": "деветта", "десет": "десетта",
+    "единаесет": "единаесетта", "дванаесет": "дванаесетта", "тринаесет": "тринаесетта",
+    "четиринаесет": "четиринаесетта", "петнаесет": "петнаесетта", "шеснаесет": "шеснаесетта",
+    "седумнаесет": "седумнаесетта", "осумнаесет": "осумнаесетта", "деветнаесет": "деветнаесетта",
+    "дваесет": "дваесетта", "триесет": "триесетта", "четириесет": "четириесетта",
+    "педесет": "педесетта", "шеесет": "шеесетта", "седумдесет": "седумдесетта",
+    "осумдесет": "осумдесетта", "деведесет": "деведесетта",
+    "сто": "стота", "двесте": "двестота", "триста": "тристота",
+}
+
+
+def year_words(n: int) -> str:
+    """Read a year as a feminine ordinal: 1995 -> ...деведесет и петта."""
+    words = cardinal(n).split(" ")
+    words[-1] = _CARD2ORD.get(words[-1], words[-1] + "та")
+    return " ".join(words)
+
+
 def _digits_words(s: str) -> str:
     return "-".join(_ONES[int(d)] for d in s)
 
@@ -173,6 +195,8 @@ def normalize_for_speech(text: str) -> str:
     text = re.sub(r"\b[A-Z]{2,}\d{2,}\b", lambda m: _spell_code(m.group(0)), text)  # MAM095
     text = re.sub(r"\b\d{1,3}(?:\.\d{3})+\b", _say_thousands, text)        # 10.000
     text = re.sub(r"\b(\d+),(\d+)\b", _say_decimal, text)                  # 0,5
+    text = re.sub(r"\b(?:19|20)\d{2}\b",                                   # years -> ordinal
+                  lambda m: year_words(int(m.group(0))), text)
     text = re.sub(r"\d+", lambda m: cardinal(int(m.group(0))), text)       # remaining integers
     # Latin terms
     for k, v in TRANSLIT_PHRASES.items():
