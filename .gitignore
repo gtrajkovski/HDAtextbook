@@ -19,3 +19,5 @@ __pycache__/
 
 # Generated audiobook output (delivered via chat, not versioned)
 audiobook/
+audiobook_final/
+*.zip
