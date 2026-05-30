@@ -16,3 +16,6 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Generated audiobook output (delivered via chat, not versioned)
+audiobook/
