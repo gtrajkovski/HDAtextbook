@@ -36,6 +36,11 @@ BODY_SIZE = 9.5
 HEAD_SIZE = 13.0
 VOICE_NUMBERED = "mk-MK-MarijaNeural"       # ALL-CAPS chapters
 VOICE_INTERLUDE = "mk-MK-AleksandarNeural"  # mixed-case interludes
+# Per-voice speaking rate (edge-tts). Marija reads a touch slower.
+RATE = {
+    VOICE_NUMBERED: "-8%",
+    VOICE_INTERLUDE: "+0%",
+}
 MAX_CHARS = 4000
 GAP_MS = 300
 MAX_RETRIES = 5
@@ -155,7 +160,7 @@ async def synth_chunk(text, out_path, voice, idx, total):
     delay = 2.0
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            await edge_tts.Communicate(text, voice).save(str(out_path))
+            await edge_tts.Communicate(text, voice, rate=RATE.get(voice, "+0%")).save(str(out_path))
             if out_path.stat().st_size > 0:
                 print(f"    [{idx}/{total}] ok ({len(text)} chars)")
                 return
