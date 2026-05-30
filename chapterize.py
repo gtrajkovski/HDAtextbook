@@ -1,23 +1,26 @@
 """
 Chapter-aware extractor + dual-voice renderer for 'Препорачана акција'.
 
-Headings are set at 13pt (body is 9.5pt). Two heading styles:
-  - ALL-CAPS, letter-spaced  -> NUMBERED chapters       -> Marija  (female)
-  - Mixed-case               -> UNNUMBERED interludes   -> Aleksandar (male)
+Layout facts learned from the PDF:
+  - Body text   : 9.5pt NotoSerif
+  - Chapter head: 13pt   (ALL-CAPS letter-spaced = NUMBERED chapters -> Marija;
+                          mixed-case = UNNUMBERED interludes        -> Aleksandar)
+  - Part divider: 28pt 'ДЕЛ' + 9.5pt 'ПРВ/ВТОР/ТРЕТ' on its own page
+  - Chapter no. : 12pt (dropped)
+  - Page numbers: 9.5pt bare-digit line at top of every page (MUST be dropped)
+  - Running head: 7pt spaced author/title line (dropped by font filter)
+  - Screen code : 6.5pt DejaVuSansMono (replaced by a spoken marker)
 
-The renderer:
-  - detects every 13pt heading (font-size based, so it catches interludes too),
-  - reconstructs heading words from character gaps,
-  - strips running headers / page numbers / chapter ordinals (all non-body sizes),
-  - segments the book heading-to-heading,
-  - renders each segment in its assigned voice (resumable per chunk),
-  - writes one MP3 per segment into ./audiobook/.
+Narration rules:
+  - Never read page numbers, running headers/footers, or chapter ordinals.
+  - Announce 'Прв дел / Втор дел / Трет дел' before the chapter that opens a part.
+  - Read all numbers as natural Macedonian words (years, counts, times, IP, …).
+  - Spell ID codes/hex; transliterate Latin terms to Cyrillic.
 
 Usage:
-  python chapterize.py                 # list all segments + assigned voice
-  python chapterize.py 1               # render segment #1
-  python chapterize.py 1 2 3           # render several
-  python chapterize.py all             # render everything
+  python chapterize.py            # list segments + voice
+  python chapterize.py 1 2 3      # render some
+  python chapterize.py all        # render everything
 """
 
 import asyncio
@@ -34,23 +37,92 @@ PDF = Path("Recommended_Action_Macedonian_9p5pt_RECTO_FIXED.pdf")
 OUT_DIR = Path("audiobook")
 BODY_SIZE = 9.5
 HEAD_SIZE = 13.0
+MONO_FONT = "DejaVuSansMono"
+MONO_MARKER = "На екранот се прикажува извадок код."
+
 VOICE_NUMBERED = "mk-MK-MarijaNeural"       # ALL-CAPS chapters
 VOICE_INTERLUDE = "mk-MK-AleksandarNeural"  # mixed-case interludes
-# Per-voice speaking rate (edge-tts). Marija reads a touch slower.
-RATE = {
-    VOICE_NUMBERED: "-8%",
-    VOICE_INTERLUDE: "+0%",
-}
+RATE = {VOICE_NUMBERED: "-8%", VOICE_INTERLUDE: "+0%"}
+
 MAX_CHARS = 4000
 GAP_MS = 300
 MAX_RETRIES = 5
 
+PART_LABEL = {"ПРВ": "Прв дел", "ВТОР": "Втор дел", "ТРЕТ": "Трет дел"}
 
-MONO_FONT = "DejaVuSansMono"
-MONO_MARKER = "На екранот се прикажува извадок код."
+# ===========================================================================
+# Macedonian number-to-words
+# ===========================================================================
+_ONES = {0: "нула", 1: "еден", 2: "два", 3: "три", 4: "четири", 5: "пет",
+         6: "шест", 7: "седум", 8: "осум", 9: "девет"}
+_TEENS = {10: "десет", 11: "единаесет", 12: "дванаесет", 13: "тринаесет",
+          14: "четиринаесет", 15: "петнаесет", 16: "шеснаесет",
+          17: "седумнаесет", 18: "осумнаесет", 19: "деветнаесет"}
+_TENS = {2: "дваесет", 3: "триесет", 4: "четириесет", 5: "педесет",
+         6: "шеесет", 7: "седумдесет", 8: "осумдесет", 9: "деведесет"}
+_HUND = {1: "сто", 2: "двесте", 3: "триста", 4: "четиристотини",
+         5: "петстотини", 6: "шестстотини", 7: "седумстотини",
+         8: "осумстотини", 9: "деветстотини"}
 
-# --- speech normalization -------------------------------------------------
-# Latin words / terms -> Cyrillic (both the Macedonian gloss and this are read).
+
+def _under_100(n: int) -> str:
+    if n < 10:
+        return _ONES[n]
+    if n < 20:
+        return _TEENS[n]
+    t = _TENS[n // 10]
+    u = n % 10
+    return t if u == 0 else f"{t} и {_ONES[u]}"
+
+
+def _under_1000_parts(n: int) -> list[str]:
+    parts = []
+    if n // 100:
+        parts.append(_HUND[n // 100])
+    if n % 100:
+        parts.append(_under_100(n % 100))
+    return parts
+
+
+def cardinal(n: int) -> str:
+    if n == 0:
+        return "нула"
+    seq = []
+    th, rest = divmod(n, 1000)
+    if th:
+        seq.append("илјада" if th == 1 else ("две илјади" if th == 2 else f"{cardinal(th)} илјади"))
+    seq += _under_1000_parts(rest)
+    if len(seq) == 1:
+        return seq[0]
+    last = seq[-1]
+    head = " ".join(seq[:-1])
+    return f"{head} {last}" if " и " in last else f"{head} и {last}"
+
+
+def _digits_words(s: str) -> str:
+    return "-".join(_ONES[int(d)] for d in s)
+
+
+def _say_time(m) -> str:
+    h, mm = int(m.group(1)), int(m.group(2))
+    return f"{cardinal(h)} часот" if mm == 0 else f"{cardinal(h)} и {cardinal(mm)}"
+
+
+def _say_ip(m) -> str:
+    return " точка ".join(cardinal(int(o)) for o in m.group(0).split("."))
+
+
+def _say_decimal(m) -> str:
+    return f"{cardinal(int(m.group(1)))} запирка {_digits_words(m.group(2))}"
+
+
+def _say_thousands(m) -> str:
+    return cardinal(int(m.group(0).replace(".", "")))
+
+
+# ===========================================================================
+# Speech normalization (codes, Latin, numbers)
+# ===========================================================================
 TRANSLIT = {
     "Vanguard": "Вангард", "Medical": "Медикал", "Billing": "Билинг",
     "Canton": "Кантон", "MERA": "МЕРА", "VoIP": "Воип", "IP": "Ај-Пи",
@@ -58,50 +130,25 @@ TRANSLIT = {
     "portmirroring": "порт-мирроринг", "verdigris": "вердигрис",
     "enter": "ентер", "II": "Втор", "USB": "У-Ес-Бе",
 }
-# Multi-token / hyphenated terms handled before single-word substitution.
-TRANSLIT_PHRASES = {
-    "keep-alive": "кип-алајв",
-}
-# Latin letter -> Cyrillic letter for spelling out ID codes.
+TRANSLIT_PHRASES = {"keep-alive": "кип-алајв"}
 LAT2CYR = {
     "A": "А", "B": "Б", "C": "Ц", "D": "Д", "E": "Е", "F": "Ф", "G": "Г",
     "H": "Х", "I": "И", "J": "Ј", "K": "К", "L": "Л", "M": "М", "N": "Н",
     "O": "О", "P": "П", "Q": "К", "R": "Р", "S": "С", "T": "Т", "U": "У",
     "V": "В", "W": "В", "X": "Х", "Y": "Ј", "Z": "З",
 }
-_ONES = ["нула", "еден", "два", "три", "четири", "пет", "шест", "седум", "осум", "девет"]
-_TEENS = {10: "десет", 11: "единаесет", 12: "дванаесет", 13: "тринаесет",
-          14: "четиринаесет", 15: "петнаесет", 16: "шеснаесет",
-          17: "седумнаесет", 18: "осумнаесет", 19: "деветнаесет"}
-_TENS = {2: "дваесет", 3: "триесет", 4: "четириесет", 5: "педесет",
-         6: "шеесет", 7: "седумдесет", 8: "осумдесет", 9: "деведесет"}
-
-
-def _digits(num: str) -> str:
-    return "-".join(_ONES[int(d)] for d in num)
 
 
 def _num_group(num: str) -> str:
-    # Leading zero -> read digit by digit (e.g. 04 -> нула-четири).
     if len(num) >= 2 and num[0] == "0":
-        return _digits(num)
-    n = int(num)
-    if n < 10:
-        return _ONES[n]
-    if n < 20:
-        return _TEENS[n]
-    if n < 100:
-        t = _TENS[n // 10]
-        return t if n % 10 == 0 else f"{t} и {_ONES[n % 10]}"
-    return _digits(num)  # 3+ digits: spell digits
+        return _digits_words(num)
+    return cardinal(int(num))
 
 
 def _spell_code(token: str) -> str:
-    parts = re.split(r"[-–]", token)
     out = []
-    for p in parts:
-        # split a part into letter-runs and digit-runs (e.g. MAM095, 95)
-        for run in re.findall(r"[A-Za-z]+|\d+", p):
+    for part in re.split(r"[-–]", token):
+        for run in re.findall(r"[A-Za-z]+|\d+", part):
             if run[0].isdigit():
                 out.append(_num_group(run))
             else:
@@ -110,30 +157,27 @@ def _spell_code(token: str) -> str:
 
 
 def _spell_hex(m) -> str:
-    digits = m.group(1)
-    spoken = []
-    for c in digits:
-        spoken.append(_ONES[int(c)] if c.isdigit() else LAT2CYR.get(c.upper(), c))
+    spoken = [_ONES[int(c)] if c.isdigit() else LAT2CYR.get(c.upper(), c) for c in m.group(1)]
     return "нула-икс-" + "-".join(spoken)
 
 
 def normalize_for_speech(text: str) -> str:
-    # 1) hex literals: 0x28 -> нула-икс-два-осум
-    text = re.sub(r"\b0x([0-9A-Fa-f]+)\b", _spell_hex, text)
-    # 2) ID codes with hyphens: INST-SK-LOG-95-04, E-95-21 -> spelled out.
-    #    Require >=1 letter so plain numeric ranges (e.g. 1994-1995) are left alone.
-    def _code(m):
-        tok = m.group(0)
-        return _spell_code(tok) if re.search(r"[A-Za-z]", tok) else tok
-    text = re.sub(r"\b[A-Z0-9]+(?:[-–][A-Z0-9]+)+\b", _code, text)
-    # 3) model codes: MAM095 -> М-А-М, нула-девет-пет
-    text = re.sub(r"\b[A-Z]{2,}\d{2,}\b",
-                  lambda m: _spell_code(m.group(0)), text)
-    # 4) hyphenated English phrases
+    # numbers that must be recognised before generic integer handling
+    text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", _say_ip, text)          # IP
+    text = re.sub(r"\b(\d{1,2}):(\d{2})\b", _say_time, text)               # time
+    text = re.sub(r"\b0x([0-9A-Fa-f]+)\b", _spell_hex, text)              # hex
+    # ID codes (>=1 letter so numeric ranges are left for cardinal handling)
+    text = re.sub(r"\b[A-Z0-9]+(?:[-–][A-Z0-9]+)+\b",
+                  lambda m: _spell_code(m.group(0)) if re.search(r"[A-Za-z]", m.group(0)) else m.group(0),
+                  text)
+    text = re.sub(r"\b[A-Z]{2,}\d{2,}\b", lambda m: _spell_code(m.group(0)), text)  # MAM095
+    text = re.sub(r"\b\d{1,3}(?:\.\d{3})+\b", _say_thousands, text)        # 10.000
+    text = re.sub(r"\b(\d+),(\d+)\b", _say_decimal, text)                  # 0,5
+    text = re.sub(r"\d+", lambda m: cardinal(int(m.group(0))), text)       # remaining integers
+    # Latin terms
     for k, v in TRANSLIT_PHRASES.items():
         text = re.sub(re.escape(k), v, text, flags=re.IGNORECASE)
-    # 5) Latin words/runs -> Cyrillic (maximal Latin run, even when fused to
-    #    Cyrillic like 'USBпорт'; add a separator before trailing Cyrillic).
+
     def _w(m):
         w = m.group(0)
         rep = TRANSLIT.get(w, TRANSLIT.get(w.capitalize(), w))
@@ -142,17 +186,18 @@ def normalize_for_speech(text: str) -> str:
             rep += "-"
         return rep
     text = re.sub(r"[A-Za-z]{2,}", _w, text)
-    # 6) tidy heading separators: "1995 · II: Границата" reads cleanly
     text = text.replace(" · ", ", ")
     return text
 
 
+# ===========================================================================
+# PDF structure
+# ===========================================================================
 def _is_size(span, size):
     return abs(span["size"] - size) < 0.6
 
 
 def reconstruct_heading(page):
-    """Return heading text for a page (joining wrapped lines), or None."""
     pieces = []
     for b in page.get_text("rawdict")["blocks"]:
         for ln in b.get("lines", []):
@@ -171,66 +216,87 @@ def reconstruct_heading(page):
     if not pieces:
         return None
     text = " ".join(pieces)
-    # If it's letter-spaced caps ("С Л О Ј  З А"), collapse: single space = join,
-    # run of 2+ spaces = word break.
     toks = text.split(" ")
-    singles = sum(1 for t in toks if len(t) == 1)
-    if toks and singles / len(toks) >= 0.6:
+    if toks and sum(1 for t in toks if len(t) == 1) / len(toks) >= 0.6:
         text = re.sub(r" {2,}", "§", text).replace(" ", "").replace("§", " ").strip()
     return text
+
+
+def find_part_dividers(doc):
+    """Return {page_no: 'Прв дел'} for the 28pt 'ДЕЛ' divider pages."""
+    res = {}
+    for pno in range(doc.page_count):
+        has_del = ordinal = None
+        for b in doc[pno].get_text("dict")["blocks"]:
+            for ln in b.get("lines", []):
+                for sp in ln["spans"]:
+                    flat = sp["text"].replace(" ", "").strip()
+                    if sp["size"] >= 24 and "ДЕЛ" in flat:
+                        has_del = True
+                    if flat in PART_LABEL:
+                        ordinal = flat
+        if has_del and ordinal:
+            res[pno] = PART_LABEL[ordinal]
+    return res
 
 
 def voice_for(heading: str) -> str:
     letters = [c for c in heading if c.isalpha()]
     if letters and all(c.isupper() for c in letters):
-        return VOICE_NUMBERED          # ALL-CAPS -> numbered chapter -> Marija
-    return VOICE_INTERLUDE             # mixed-case -> interlude -> Aleksandar
+        return VOICE_NUMBERED
+    return VOICE_INTERLUDE
 
 
 def body_text(page) -> str:
+    """9.5pt body only; drop bare page-number lines; mark code blocks."""
     lines = []
     for b in page.get_text("dict")["blocks"]:
-        block_has_mono = False
-        block_lines = []
+        has_mono = False
         for ln in b.get("lines", []):
             txt = "".join(sp["text"] for sp in ln["spans"] if _is_size(sp, BODY_SIZE))
-            if txt.strip():
-                block_lines.append(txt)
+            if txt.strip() and not re.fullmatch(r"\s*\d+\s*", txt):   # skip page numbers
+                lines.append(txt)
             if any(sp["font"] == MONO_FONT for sp in ln["spans"]):
-                block_has_mono = True
-        lines.extend(block_lines)
-        if block_has_mono:
-            lines.append(MONO_MARKER)  # screen/code excerpt cue, in reading order
+                has_mono = True
+        if has_mono:
+            lines.append(MONO_MARKER)
     return "\n".join(lines)
 
 
 def build_segments():
     doc = fitz.open(PDF)
-    heads = []  # (page, heading)
-    for pno in range(doc.page_count):
-        h = reconstruct_heading(doc[pno])
-        if h:
-            heads.append((pno, h))
+    dividers = find_part_dividers(doc)
+    heads = [(p, reconstruct_heading(doc[p])) for p in range(doc.page_count)]
+    heads = [(p, h) for p, h in heads if h]
 
     segments = []
     for i, (start, heading) in enumerate(heads):
         end = heads[i + 1][0] if i + 1 < len(heads) else doc.page_count
-        raw = "\n".join(body_text(doc[p]) for p in range(start, end))
-        raw = re.sub(r"-\n", "", raw)
-        raw = re.sub(r"\s+", " ", raw).strip()
-        segments.append(
-            {
-                "seq": i + 1,
-                "pages": (start, end - 1),
-                "heading": heading,
-                "voice": voice_for(heading),
-                "text": normalize_for_speech(f"{heading}. {raw}"),
-            }
-        )
+        body = "\n".join(body_text(doc[p]) for p in range(start, end) if p not in dividers)
+        body = re.sub(r"-\n", "", body)
+        body = re.sub(r"\s+", " ", body).strip()
+        segments.append({
+            "seq": i + 1, "pages": (start, end - 1), "heading": heading,
+            "voice": voice_for(heading), "_body": body, "_part": None,
+        })
+
+    # Attach each part label to the first chapter that starts after its divider.
+    for dp, label in sorted(dividers.items()):
+        for s in segments:
+            if s["pages"][0] > dp:
+                s["_part"] = label
+                break
+
+    for s in segments:
+        prefix = f"{s['_part']}. " if s["_part"] else ""
+        s["text"] = normalize_for_speech(f"{prefix}{s['heading']}. {s['_body']}")
     doc.close()
     return segments
 
 
+# ===========================================================================
+# Render
+# ===========================================================================
 def split_into_chunks(text, max_chars=MAX_CHARS):
     sentences = re.split(r"(?<=[.!?…])\s+", text)
     chunks, current = [], ""
@@ -284,7 +350,7 @@ async def synth_chunk(text, out_path, voice, idx, total):
 
 
 async def render(seg, out_dir: Path) -> Path:
-    safe = re.sub(r"[^0-9A-Za-zА-Шарс ]+", "", seg["heading"])[:40].strip().replace(" ", "_")
+    safe = re.sub(r"[^0-9A-Za-zЀ-ӿ ]+", " ", seg["heading"])[:40].strip().replace(" ", "_")
     vshort = "marija" if seg["voice"] == VOICE_NUMBERED else "aleksandar"
     cache = out_dir / f"seg{seg['seq']:02d}_chunks"
     cache.mkdir(parents=True, exist_ok=True)
@@ -314,7 +380,8 @@ def main():
     if not args:
         for s in segs:
             v = "Marija    " if s["voice"] == VOICE_NUMBERED else "Aleksandar"
-            print(f"{s['seq']:2}. [{v}] {s['heading']}  (pp{s['pages'][0]}-{s['pages'][1]}, {len(s['text'])} chars)")
+            part = f"  <{s['_part']}>" if s["_part"] else ""
+            print(f"{s['seq']:2}. [{v}] {s['heading']}  (pp{s['pages'][0]}-{s['pages'][1]}, {len(s['text'])} chars){part}")
         return
     want = {a for a in args}
     for s in segs:
