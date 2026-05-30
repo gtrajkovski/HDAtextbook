@@ -1,0 +1,29 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+.virtual_documents/
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
+
+# Generated audiobook output (delivered via chat, not versioned)
+audiobook/
+audiobook_final/
+audiobook_latin/
+parts/
+parts_latin/
+*.zip
+
+# User-supplied music asset (kept locally / delivered, not versioned)
+opening_credits.mp3

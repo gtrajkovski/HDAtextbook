@@ -1,0 +1,9 @@
+# Health Data Analytics textbook - local analysis environment
+# Install with:  pip install -r requirements.txt
+
+pandas>=2.1
+numpy>=1.26
+matplotlib>=3.8
+seaborn>=0.13
+jupyterlab>=4.0
+ipykernel>=6.29
