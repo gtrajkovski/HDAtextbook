@@ -46,6 +46,107 @@ GAP_MS = 300
 MAX_RETRIES = 5
 
 
+MONO_FONT = "DejaVuSansMono"
+MONO_MARKER = "На екранот се прикажува извадок код."
+
+# --- speech normalization -------------------------------------------------
+# Latin words / terms -> Cyrillic (both the Macedonian gloss and this are read).
+TRANSLIT = {
+    "Vanguard": "Вангард", "Medical": "Медикал", "Billing": "Билинг",
+    "Canton": "Кантон", "MERA": "МЕРА", "VoIP": "Воип", "IP": "Ај-Пи",
+    "sandbox": "сандбокс", "rollback": "ролбек", "commit": "комит",
+    "portmirroring": "порт-мирроринг", "verdigris": "вердигрис",
+    "enter": "ентер", "II": "Втор", "USB": "У-Ес-Бе",
+}
+# Multi-token / hyphenated terms handled before single-word substitution.
+TRANSLIT_PHRASES = {
+    "keep-alive": "кип-алајв",
+}
+# Latin letter -> Cyrillic letter for spelling out ID codes.
+LAT2CYR = {
+    "A": "А", "B": "Б", "C": "Ц", "D": "Д", "E": "Е", "F": "Ф", "G": "Г",
+    "H": "Х", "I": "И", "J": "Ј", "K": "К", "L": "Л", "M": "М", "N": "Н",
+    "O": "О", "P": "П", "Q": "К", "R": "Р", "S": "С", "T": "Т", "U": "У",
+    "V": "В", "W": "В", "X": "Х", "Y": "Ј", "Z": "З",
+}
+_ONES = ["нула", "еден", "два", "три", "четири", "пет", "шест", "седум", "осум", "девет"]
+_TEENS = {10: "десет", 11: "единаесет", 12: "дванаесет", 13: "тринаесет",
+          14: "четиринаесет", 15: "петнаесет", 16: "шеснаесет",
+          17: "седумнаесет", 18: "осумнаесет", 19: "деветнаесет"}
+_TENS = {2: "дваесет", 3: "триесет", 4: "четириесет", 5: "педесет",
+         6: "шеесет", 7: "седумдесет", 8: "осумдесет", 9: "деведесет"}
+
+
+def _digits(num: str) -> str:
+    return "-".join(_ONES[int(d)] for d in num)
+
+
+def _num_group(num: str) -> str:
+    # Leading zero -> read digit by digit (e.g. 04 -> нула-четири).
+    if len(num) >= 2 and num[0] == "0":
+        return _digits(num)
+    n = int(num)
+    if n < 10:
+        return _ONES[n]
+    if n < 20:
+        return _TEENS[n]
+    if n < 100:
+        t = _TENS[n // 10]
+        return t if n % 10 == 0 else f"{t} и {_ONES[n % 10]}"
+    return _digits(num)  # 3+ digits: spell digits
+
+
+def _spell_code(token: str) -> str:
+    parts = re.split(r"[-–]", token)
+    out = []
+    for p in parts:
+        # split a part into letter-runs and digit-runs (e.g. MAM095, 95)
+        for run in re.findall(r"[A-Za-z]+|\d+", p):
+            if run[0].isdigit():
+                out.append(_num_group(run))
+            else:
+                out.append("-".join(LAT2CYR.get(c.upper(), c) for c in run))
+    return ", ".join(out)
+
+
+def _spell_hex(m) -> str:
+    digits = m.group(1)
+    spoken = []
+    for c in digits:
+        spoken.append(_ONES[int(c)] if c.isdigit() else LAT2CYR.get(c.upper(), c))
+    return "нула-икс-" + "-".join(spoken)
+
+
+def normalize_for_speech(text: str) -> str:
+    # 1) hex literals: 0x28 -> нула-икс-два-осум
+    text = re.sub(r"\b0x([0-9A-Fa-f]+)\b", _spell_hex, text)
+    # 2) ID codes with hyphens: INST-SK-LOG-95-04, E-95-21 -> spelled out.
+    #    Require >=1 letter so plain numeric ranges (e.g. 1994-1995) are left alone.
+    def _code(m):
+        tok = m.group(0)
+        return _spell_code(tok) if re.search(r"[A-Za-z]", tok) else tok
+    text = re.sub(r"\b[A-Z0-9]+(?:[-–][A-Z0-9]+)+\b", _code, text)
+    # 3) model codes: MAM095 -> М-А-М, нула-девет-пет
+    text = re.sub(r"\b[A-Z]{2,}\d{2,}\b",
+                  lambda m: _spell_code(m.group(0)), text)
+    # 4) hyphenated English phrases
+    for k, v in TRANSLIT_PHRASES.items():
+        text = re.sub(re.escape(k), v, text, flags=re.IGNORECASE)
+    # 5) Latin words/runs -> Cyrillic (maximal Latin run, even when fused to
+    #    Cyrillic like 'USBпорт'; add a separator before trailing Cyrillic).
+    def _w(m):
+        w = m.group(0)
+        rep = TRANSLIT.get(w, TRANSLIT.get(w.capitalize(), w))
+        nxt = m.string[m.end():m.end() + 1]
+        if nxt and "Ѐ" <= nxt <= "ӿ":
+            rep += "-"
+        return rep
+    text = re.sub(r"[A-Za-z]{2,}", _w, text)
+    # 6) tidy heading separators: "1995 · II: Границата" reads cleanly
+    text = text.replace(" · ", ", ")
+    return text
+
+
 def _is_size(span, size):
     return abs(span["size"] - size) < 0.6
 
@@ -89,10 +190,17 @@ def voice_for(heading: str) -> str:
 def body_text(page) -> str:
     lines = []
     for b in page.get_text("dict")["blocks"]:
+        block_has_mono = False
+        block_lines = []
         for ln in b.get("lines", []):
             txt = "".join(sp["text"] for sp in ln["spans"] if _is_size(sp, BODY_SIZE))
             if txt.strip():
-                lines.append(txt)
+                block_lines.append(txt)
+            if any(sp["font"] == MONO_FONT for sp in ln["spans"]):
+                block_has_mono = True
+        lines.extend(block_lines)
+        if block_has_mono:
+            lines.append(MONO_MARKER)  # screen/code excerpt cue, in reading order
     return "\n".join(lines)
 
 
@@ -116,7 +224,7 @@ def build_segments():
                 "pages": (start, end - 1),
                 "heading": heading,
                 "voice": voice_for(heading),
-                "text": f"{heading}. {raw}",
+                "text": normalize_for_speech(f"{heading}. {raw}"),
             }
         )
     doc.close()
