@@ -29,7 +29,7 @@ from pydub import AudioSegment
 #   "mk-MK-MarijaNeural"      (female)
 #   "mk-MK-AleksandarNeural"  (male)
 # ----------------------------------------------------------------------------
-VOICE = "mk-MK-MarijaNeural"
+VOICE = "mk-MK-AleksandarNeural"
 
 PDF_PATH = Path(
     r"C:\Users\gpt30\OneDrive\Desktop\FICTION\RECOMMENDED ACTION\macedonian\Recommended_Action_Macedonian_9p5pt_RECTO_FIXED.pdf"
