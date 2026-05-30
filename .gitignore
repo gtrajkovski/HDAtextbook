@@ -24,3 +24,6 @@ audiobook_latin/
 parts/
 parts_latin/
 *.zip
+
+# User-supplied music asset (kept locally / delivered, not versioned)
+opening_credits.mp3
